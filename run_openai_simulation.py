@@ -1,0 +1,879 @@
+#!/usr/bin/env python3
+"""Run the OpenAI hiring DSS simulation from the notebook workflow."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import re
+import time
+import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Literal, Optional, Union
+
+import tiktoken
+from llama_index.core import Document, Response, Settings, VectorStoreIndex
+from llama_index.core.base.base_query_engine import BaseQueryEngine
+from llama_index.core.callbacks import CallbackManager
+from llama_index.core.callbacks.token_counting import TokenCountingHandler
+from llama_index.core.llms import LLM
+from llama_index.core.readers.base import BaseReader
+from llama_index.core.workflow import Context, Event, StartEvent, StopEvent, Workflow, step
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.openai import OpenAI
+from llama_index.readers.file import DocxReader, PDFReader
+from pydantic import BaseModel
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_DATA_DIR = REPO_ROOT / "data" / "simulation"
+DEFAULT_MODEL_BASE_PATH = REPO_ROOT / "model"
+DEFAULT_OPENAI_MODEL = "gpt-6-luna"
+
+
+def add_to_json_file(json_file: Path, new_data: dict[str, Any]) -> None:
+    data: list[Any] = []
+    try:
+        with json_file.open("r", encoding="utf-8") as file:
+            try:
+                data = json.load(file)
+                if not isinstance(data, list):
+                    data = [data]
+            except json.JSONDecodeError:
+                data = []
+            data.append(new_data)
+    except FileNotFoundError:
+        data = [new_data]
+
+    json_file.parent.mkdir(parents=True, exist_ok=True)
+    with json_file.open("w", encoding="utf-8") as file:
+        json.dump(data, file, indent=4)
+
+
+def read_json(json_file_path: Path) -> Union[dict[str, Any], list[Any]]:
+    with json_file_path.open(encoding="utf-8") as json_file:
+        return json.load(json_file)
+
+
+def extract_structured_data(string_value: str, output_format: str = "json") -> str:
+    del output_format
+    json_patterns = (
+        r"```json\s*({.*?})\s*```",
+        r"```json\s*({.*?})\s*",
+        r"```\s*({.*?})\s```*",
+    )
+    for pattern in json_patterns:
+        match = re.search(pattern, string_value, re.DOTALL)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def parse_json(string_value: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(string_value)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.decoder.JSONDecodeError:
+        return {}
+
+
+@dataclass
+class Company:
+    id: str
+    name: str
+    date_founded: str
+    mission_statement: str
+    vision: str
+    company_culture_statement: str
+    address: str
+
+
+@dataclass
+class JobDescription:
+    id: str
+    company_id: str
+    job_title: str
+    job_description_file: str
+
+
+@dataclass
+class JobPost:
+    id: str
+    created_date: str
+    title: str
+    job_description_id: str
+    active: bool
+    salary_range: str
+
+
+@dataclass
+class JobApplication:
+    id: str
+    candidate_name: str
+    candidate_email: str
+    created_date: str
+    job_post_id: str
+    resume_link: str
+    active: bool
+
+
+@dataclass
+class DataPool:
+    job_descriptions: list[JobDescription]
+    job_posts: list[JobPost]
+    job_applications: list[JobApplication]
+    company_info: Optional[Company] = None
+
+
+def resolve_dataset_path(base_dataset_folder: Path, dataset_ref: str) -> Path:
+    return base_dataset_folder / dataset_ref.lstrip("/")
+
+
+def process_file_to_docs(file_path: Path, metadata: dict[str, str], text_data: str | None = None):
+    file_readers: dict[str, BaseReader] = {
+        ".pdf": PDFReader(return_full_document=True),
+        ".docx": DocxReader(),
+    }
+    reader = file_readers.get(file_path.suffix.lower())
+    if reader is None:
+        raise ValueError(f"Unsupported file type: {file_path}")
+    if not file_path.exists():
+        raise FileNotFoundError(f"Referenced dataset file does not exist: {file_path}")
+
+    docs = reader.load_data(file_path)
+    if docs:
+        if text_data:
+            docs[0] = Document(text=f"{text_data}\n{docs[0].text}", metadata=docs[0].metadata)
+
+        for doc in docs:
+            doc.metadata.update(metadata)
+            doc.excluded_llm_metadata_keys.extend(["file_name", "file_path", "file_type", "file_size"])
+            doc.excluded_embed_metadata_keys.extend(["file_name", "file_path", "file_type", "file_size"])
+    return docs
+
+
+class DataIngestionService:
+    def __init__(self, base_dataset_folder: Path, embedding_model: HuggingFaceEmbedding, score_data: dict[str, Any]):
+        self._embedding_model = embedding_model
+        self._score_data = score_data
+        self._base_dataset_folder = base_dataset_folder
+        self._doc_store: dict[str, list[Document]] = {}
+        self._vector_index_map: dict[str, VectorStoreIndex] = {}
+        self._criteria_id_map = {
+            "1": "Experience",
+            "2": "Skills",
+            "3": "Academic Qualifications",
+            "4": "Certifications",
+            "5": "Soft Skills",
+        }
+
+    def index_job_application(self, job_application: JobApplication) -> None:
+        data_text = f"""
+        Job Application Data for Application ID: {job_application.id}
+
+        Candidate Name: {job_application.candidate_name}
+        Candidate Email: {job_application.candidate_email}
+        Application Date: {job_application.created_date}
+        Job Post ID: {job_application.job_post_id}
+        """
+
+        score_output = ["Application score data:"]
+        for score_entry in self._score_data.get(job_application.id, []):
+            criterion = self._criteria_id_map.get(str(score_entry.get("criterion_id")))
+            if criterion is not None:
+                score_output.append(
+                    f"  Criterion: {criterion}\n"
+                    f"  Score: {score_entry.get('score', 'N/A')} / {score_entry.get('max_score', 'N/A')}\n"
+                    f"  Explanation: {score_entry.get('explanation', 'No explanation provided.')}\n"
+                    f"  Assessment Feedback: {score_entry.get('feedback', 'No feedback provided.')}\n"
+                )
+
+        if len(score_output) > 1:
+            data_text += "\n" + "\n".join(score_output)
+
+        docs = process_file_to_docs(
+            file_path=resolve_dataset_path(self._base_dataset_folder, job_application.resume_link),
+            text_data=data_text,
+            metadata={
+                "job_application_reference": job_application.id,
+                "job_post_reference": job_application.job_post_id,
+            },
+        )
+        docs.append(
+            Document(
+                text=data_text,
+                metadata={
+                    "job_application_reference": job_application.id,
+                    "job_post_reference": job_application.job_post_id,
+                },
+            )
+        )
+        self._doc_store.setdefault("job_applications", []).extend(docs)
+
+    def index_job_description(self, job_description: JobDescription) -> None:
+        data_text = f"""
+        Job Description Data with ID: {job_description.id}
+
+        Job Description Name: {job_description.job_title}
+        """
+        docs = process_file_to_docs(
+            file_path=resolve_dataset_path(self._base_dataset_folder, job_description.job_description_file),
+            metadata={"job_description_reference": job_description.id},
+            text_data=data_text,
+        )
+        self._doc_store.setdefault("job_descriptions", []).extend(docs)
+
+    def index_job_post(self, job_post: JobPost) -> None:
+        data_text = f"""
+        Job Post Data with ID: {job_post.id}
+
+        Job Description ID: {job_post.job_description_id}
+        Job Post Title: {job_post.title}
+        Salary Range: {job_post.salary_range}
+        Posted Date: {job_post.created_date}
+        """
+        docs = [
+            Document(
+                text=data_text,
+                metadata={
+                    "job_post_reference": job_post.id,
+                    "job_description_reference": job_post.job_description_id,
+                },
+            )
+        ]
+        self._doc_store.setdefault("job_posts", []).extend(docs)
+
+    def index_company_info(self, company: Company) -> None:
+        data_text = f"""
+        Company Information: {company.id}
+
+        Company Name: {company.name}
+        Company Vision: {company.vision}
+        Company Mission: {company.mission_statement}
+        Company Culture Statement: {company.company_culture_statement}
+        Address: {company.address}
+        Date Founded: {company.date_founded}
+        """
+        self._doc_store.setdefault("company_info", []).append(
+            Document(text=data_text, metadata={"parent_obj_ref": company.id})
+        )
+
+    def write_data_to_stores(self, datapool: DataPool) -> None:
+        for application in datapool.job_applications:
+            self.index_job_application(application)
+        for description in datapool.job_descriptions:
+            self.index_job_description(description)
+        for post in datapool.job_posts:
+            self.index_job_post(post)
+        if datapool.company_info is not None:
+            self.index_company_info(datapool.company_info)
+
+    def get_store_index(
+        self,
+        store: Literal["job_posts", "job_descriptions", "job_applications", "company_info"],
+    ) -> VectorStoreIndex:
+        if store not in self._vector_index_map:
+            documents = self._doc_store[store]
+            self._vector_index_map[store] = VectorStoreIndex.from_documents(
+                documents=documents,
+                embed_model=self._embedding_model,
+            )
+        return self._vector_index_map[store]
+
+
+class ToolOutput(BaseModel):
+    tool: str
+    output: str
+    context: Any
+
+
+class ToolQuery(BaseModel):
+    tool: str
+    query: str
+
+
+class ContextRetrievalEvent(Event):
+    tool: Optional[str] = None
+    context: Optional[str] = None
+    query: str
+
+
+class JobPostContextEvent(ContextRetrievalEvent):
+    tool: str = "job_post_tool"
+
+
+class JobApplicationContextEvent(ContextRetrievalEvent):
+    tool: str = "job_application_tool"
+
+
+class JobDescriptionContextEvent(ContextRetrievalEvent):
+    tool: str = "job_description_tool"
+
+
+class CompanyInfoContextEvent(ContextRetrievalEvent):
+    tool: str = "company_information_tool"
+
+
+class ContextOutputEvent(Event):
+    tool: str
+    query: str
+    output: str
+
+
+class ContextProcessOutputEvent(Event):
+    user_query: str
+    context: list[str]
+    tool_path: list[str]
+
+
+class ContextAgentResult(BaseModel):
+    tool_path: list[str]
+    context: list[str]
+
+
+class QuestionBreakDownEvent(Event):
+    user_question: str
+    questions: list[str]
+
+
+class ContextBuilderAgentWorkflow(Workflow):
+    def __init__(
+        self,
+        job_application_query_engine: BaseQueryEngine,
+        job_post_query_engine: BaseQueryEngine,
+        job_description_query_engine: BaseQueryEngine,
+        company_info_query_engine: BaseQueryEngine,
+        llm: LLM,
+        max_tool_use: int = 1,
+    ):
+        super().__init__(timeout=300)
+        self.max_tool_use = max_tool_use
+        self.job_application_query_engine = job_application_query_engine
+        self.job_post_query_engine = job_post_query_engine
+        self.job_description_query_engine = job_description_query_engine
+        self.company_info_query_engine = company_info_query_engine
+        self.tools = ["job_application_tool", "job_post_tool", "job_description_tool", "company_information_tool"]
+        self.llm = llm
+
+    async def update_tool_use_context(self, ctx: Context, tool: str) -> None:
+        tool_use_data = await ctx.get("tool_use_tracker", {})
+        tool_use_data[tool] = (tool_use_data[tool] if tool in tool_use_data and tool_use_data[tool] >= 0 else 0) + 1
+        await ctx.set("tool_use_tracker", tool_use_data)
+
+    async def tool_use_limit_reached(self, ctx: Context, tool: str | None) -> bool:
+        if not tool:
+            return False
+        tool_use_data = await ctx.get("tool_use_tracker", {})
+        return tool_use_data[tool] >= self.max_tool_use if tool in tool_use_data and tool_use_data[tool] else False
+
+    def process_query_engine_context_retrieval(
+        self,
+        engine: BaseQueryEngine,
+        event: ContextRetrievalEvent,
+    ) -> ContextOutputEvent:
+        prompt = f"""
+        ## Question:
+        {event.query}
+        """
+        if event.context:
+            prompt += f"""
+            ## Context:
+            {event.context}
+            """
+        response: Response = engine.query(prompt)
+        return ContextOutputEvent(tool=event.tool, output=response.response.strip(), query=event.query)
+
+    @step
+    async def router_agent_node(
+        self,
+        ctx: Context,
+        ev: StartEvent,
+    ) -> JobApplicationContextEvent | JobPostContextEvent | JobDescriptionContextEvent | CompanyInfoContextEvent:
+        answer_relevancy_prompt = f"""
+        Given a query and a list of tools, choose the best tool that can provide relevant context.
+
+        Tools:
+        job_application_tool: Provides information about candidates and job applications
+        job_post_tool: Provides information on job posts that candidates apply to and salary details for such positions
+        job_description_tool: Provides detailed information about jobs and job details
+        company_information_tool: Provides information about a company the candidate is applying to
+
+        Return only one tool name and no additional text.
+
+        Query:
+        {ev.query}
+
+        Response:
+        """
+        selection_response = self.llm.complete(answer_relevancy_prompt)
+        tool = selection_response.text.strip()
+        limit_reached = await self.tool_use_limit_reached(ctx, tool)
+
+        if tool in self.tools and not limit_reached:
+            if tool == "job_application_tool":
+                return JobApplicationContextEvent(query=ev.query)
+            if tool == "job_post_tool":
+                return JobPostContextEvent(query=ev.query)
+            if tool == "job_description_tool":
+                return JobDescriptionContextEvent(query=ev.query)
+            if tool == "company_information_tool":
+                return CompanyInfoContextEvent(query=ev.query)
+        return JobApplicationContextEvent(query=ev.query)
+
+    @step
+    async def job_application_agent_node(self, event: JobApplicationContextEvent) -> ContextOutputEvent:
+        return self.process_query_engine_context_retrieval(self.job_application_query_engine, event)
+
+    @step
+    async def job_post_agent_node(self, event: JobPostContextEvent) -> ContextOutputEvent:
+        return self.process_query_engine_context_retrieval(self.job_post_query_engine, event)
+
+    @step
+    async def job_description_agent_node(self, event: JobDescriptionContextEvent) -> ContextOutputEvent:
+        return self.process_query_engine_context_retrieval(self.job_description_query_engine, event)
+
+    @step
+    async def company_info_agent_node(self, event: CompanyInfoContextEvent) -> ContextOutputEvent:
+        return self.process_query_engine_context_retrieval(self.company_info_query_engine, event)
+
+    @step
+    async def context_evaluator_agent_node(
+        self,
+        ctx: Context,
+        ev: ContextOutputEvent,
+    ) -> JobApplicationContextEvent | JobPostContextEvent | JobDescriptionContextEvent | CompanyInfoContextEvent | StopEvent:
+        await self.update_tool_use_context(ctx, ev.tool)
+        tool_paths = await ctx.get("tool_path", [])
+        context = await ctx.get("generated_context", [])
+        context.append(ev.output)
+        tool_paths.append(ev.tool)
+        await ctx.set("tool_path", tool_paths)
+        await ctx.set("generated_context", context)
+
+        context_string = "\n".join(context)
+        context_tools = "\n".join([f"{index + 1}. {tool}" for index, tool in enumerate(tool_paths)])
+        answer_relevancy_prompt = f"""
+        Determine if the current context is sufficient to answer the query. If not, choose the next best tool.
+
+        Defined Tools:
+        job_application_tool: Provides information about candidates and job applications
+        job_post_tool: Provides information on job posts that candidates apply to and salary details for such positions
+        job_description_tool: Contains job description information
+        company_information_tool: Provides information about a company the candidate is applying to
+
+        Tool context relationships:
+        - job_application references job_post
+        - job_post references job_description
+        - job_description references company_information
+
+        Return only this JSON inside markdown JSON delimiters:
+        ```json
+        {{
+            "sufficient": false,
+            "complementary_question": "question",
+            "suggested_tool": "tool_name"
+        }}
+        ```
+
+        Query:
+        {ev.query}
+
+        Context:
+        {context_string}
+
+        Context Tools:
+        {context_tools}
+
+        Response:
+        """
+        relevancy_response = self.llm.complete(answer_relevancy_prompt)
+        relevancy_data = parse_json(extract_structured_data(relevancy_response.text.strip()))
+        if "suggested_tool" in relevancy_data:
+            suggested_tool = relevancy_data["suggested_tool"]
+            limit_reached = await self.tool_use_limit_reached(ctx, suggested_tool)
+            complementary_question = relevancy_data.get("complementary_question")
+            process_query = ev.query.split("\n Complementary Question:")[0]
+            print(
+                "Relevancy response "
+                f"Prev tools: {','.join(tool_paths)} >> tool: {suggested_tool}, "
+                f"suff: {relevancy_data.get('sufficient')} >> complement: {complementary_question}"
+            )
+            next_query = process_query + (f"\n Complementary Question: {complementary_question}" if complementary_question else "")
+            if not relevancy_data.get("sufficient") and suggested_tool in self.tools and not limit_reached:
+                if suggested_tool == "job_application_tool":
+                    return JobApplicationContextEvent(query=next_query)
+                if suggested_tool == "job_post_tool":
+                    return JobPostContextEvent(query=next_query)
+                if suggested_tool == "job_description_tool":
+                    return JobDescriptionContextEvent(query=next_query)
+                if suggested_tool == "company_information_tool":
+                    return CompanyInfoContextEvent(query=next_query)
+
+        return StopEvent(result=ContextAgentResult(tool_path=tool_paths, context=context))
+
+
+class HiringDSSAgentWorkflow(Workflow):
+    def __init__(self, context_agent: ContextBuilderAgentWorkflow, response_synthesis_llm: LLM, max_iterations: int = 1):
+        super().__init__(timeout=300)
+        self.max_iterations = max_iterations
+        self.context_agent = context_agent
+        self.response_synthesis_agent_llm = response_synthesis_llm
+
+    @step
+    async def strategy_agent_node(self, event: StartEvent) -> QuestionBreakDownEvent:
+        return QuestionBreakDownEvent(questions=[], user_question=event.get("input"))
+
+    @step
+    async def context_retrival_agent_node(self, event: QuestionBreakDownEvent) -> ContextProcessOutputEvent:
+        context: list[str] = []
+        paths: list[str] = []
+        questions = event.questions or [event.user_question]
+        for question in questions:
+            process_question = f"{event.user_question}\n{question}" if question != event.user_question else event.user_question
+            context_output: ContextAgentResult = await self.context_agent.run(query=process_question)
+            context.extend(context_output.context)
+            paths.extend(context_output.tool_path)
+        return ContextProcessOutputEvent(context=context, user_query=event.user_question, tool_path=paths)
+
+    @step
+    async def response_synthesis_agent(self, ev: ContextProcessOutputEvent) -> StopEvent:
+        context_by_tool: dict[str, list[str]] = {}
+        for ctx_data, tool in zip(ev.context, ev.tool_path):
+            context_by_tool.setdefault(tool, []).append(ctx_data.strip())
+
+        context_string = ""
+        for tool, values in context_by_tool.items():
+            context_string += f"\n\nDatasource: {tool}\nContext:\n" + "\n".join(values)
+
+        prompt = f"""
+        Given this user question, and context retrieved from different data sources based on the question,
+        generate a response to the user question. Return only the response.
+
+        ## User Question:
+        {ev.user_query}
+
+        ## Context:
+        {context_string}
+
+        ## Response:
+        """
+        response = self.response_synthesis_agent_llm.complete(prompt)
+        return StopEvent(
+            result={
+                "response": {"text": response.text},
+                "context": ev.context,
+                "paths": ev.tool_path,
+            }
+        )
+
+
+def get_test_cases(test_case_config: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(test_case_config.values())
+
+
+def get_simulation_data(test_case_code: str, datapool: dict[str, Any], test_case_config: dict[str, Any]) -> DataPool:
+    full_pool = DataPool(
+        company_info=Company(**datapool["company_info"]),
+        job_descriptions=[JobDescription(**item) for item in datapool["job_descriptions"]],
+        job_posts=[JobPost(**item) for item in datapool["job_posts"]],
+        job_applications=[JobApplication(**item) for item in datapool["job_applications"]],
+    )
+    config = test_case_config[test_case_code]
+    return DataPool(
+        company_info=full_pool.company_info,
+        job_descriptions=full_pool.job_descriptions[: config["job_descriptions"]],
+        job_posts=full_pool.job_posts[: config["job_posts"]],
+        job_applications=full_pool.job_applications[: config["job_applications"]],
+    )
+
+
+async def run_simulation(
+    test_case: str,
+    questions: list[dict[str, Any]],
+    run_function: Callable[..., Awaitable[Any]],
+    output_path: Path,
+    token_counter: TokenCountingHandler,
+) -> None:
+    for index, question in enumerate(questions):
+        error = None
+        response = None
+        start_time = time.perf_counter()
+        try:
+            print(f"[{test_case}] Question {index + 1}/{len(questions)}: {question['question']}")
+            response = await run_function(input=question["question"])
+        except Exception as exc:
+            traceback.print_exc()
+            error = str(exc)
+        finally:
+            end_time = time.perf_counter()
+            prompt_token = token_counter.prompt_llm_token_count
+            response_token = token_counter.completion_llm_token_count
+            token_counter.reset_counts()
+
+        response_data = response["response"] if response else None
+        metric_data = {
+            "batch_id": test_case,
+            "question_id": question["number"],
+            "prompt": question["question"],
+            "expected_output": question["response"],
+            "model_response": response_data["text"] if response_data else None,
+            "context": response["context"] if response else [],
+            "error": error,
+            "processing_time": end_time - start_time,
+            "processing_path": response["paths"] if response else [],
+            "power_consumption": [],
+            "prompt_token_count": prompt_token,
+            "response_token_count": response_token,
+        }
+        add_to_json_file(output_path / f"TC_OUTPUT_{test_case}.json", metric_data)
+
+
+def build_openai_llm(
+    *,
+    model: str,
+    system_prompt: str | None,
+    temperature: float | None,
+    max_output_tokens: int,
+    reasoning_effort: str | None,
+    verbose: bool,
+) -> OpenAI:
+    llm_kwargs: dict[str, Any] = {
+        "model": model,
+        "verbose": verbose,
+        "max_tokens": max_output_tokens,
+    }
+    if system_prompt:
+        llm_kwargs["system_prompt"] = system_prompt
+    if temperature is not None:
+        llm_kwargs["temperature"] = temperature
+    if reasoning_effort and reasoning_effort != "none":
+        llm_kwargs["additional_kwargs"] = {"reasoning_effort": reasoning_effort}
+    elif reasoning_effort == "none":
+        llm_kwargs["additional_kwargs"] = {"reasoning_effort": "none"}
+    return OpenAI(**llm_kwargs)
+
+
+def build_tokenizer(model: str):
+    try:
+        return tiktoken.encoding_for_model(model).encode
+    except KeyError:
+        try:
+            return tiktoken.get_encoding("o200k_base").encode
+        except ValueError:
+            return tiktoken.get_encoding("cl100k_base").encode
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the OpenAI hiring DSS simulation.")
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="Folder containing simulation JSON files and dataset files.")
+    parser.add_argument("--output-dir", type=Path, default=None, help="Folder for output JSON files. Defaults to <data-dir>/output/openai/workflow_<model>.")
+    parser.add_argument("--model", default=DEFAULT_OPENAI_MODEL, help="OpenAI model ID. Defaults to gpt-6-luna for high-volume simulation runs.")
+    parser.add_argument("--embedding-model-name", default="BAAI/bge-m3", help="Hugging Face embedding model name or local path.")
+    parser.add_argument("--embedding-cache-dir", type=Path, default=None, help="Embedding cache folder. Defaults to <repo>/model/embedding.")
+    parser.add_argument("--test-case", action="append", help="Run one test case code, e.g. TC1. Repeat to run multiple. Defaults to all.")
+    parser.add_argument("--question-limit", type=int, default=None, help="Only run the first N questions from truthful_qa_questions.json.")
+    parser.add_argument("--similarity-top-k", type=int, default=2)
+    parser.add_argument("--max-tool-use", type=int, default=1)
+    parser.add_argument("--max-output-tokens", type=int, default=2048)
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--retrieval-temperature", type=float, default=0.3)
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=["none", "low", "medium", "high", "xhigh", "max"],
+        default="none",
+        help="Reasoning effort passed through to supported OpenAI chat models.",
+    )
+    parser.add_argument(
+        "--disable-temperature",
+        action="store_true",
+        help="Do not send temperature. Useful for reasoning modes/models that reject temperature.",
+    )
+    parser.add_argument("--openai-api-key", default=None, help="OpenAI API key. Defaults to OPENAI_API_KEY from the environment.")
+    parser.add_argument("--verbose-openai", action="store_true", help="Enable LlamaIndex OpenAI verbose logging.")
+    return parser
+
+
+def validate_inputs(data_dir: Path) -> None:
+    required_json = [
+        "application_score_data.json",
+        "test_case_config.json",
+        "truthful_qa_questions.json",
+        "evaluation_data_pool.json",
+    ]
+    missing = [str(data_dir / name) for name in required_json if not (data_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError("Missing required input files:\n" + "\n".join(f"- {path}" for path in missing))
+
+
+async def main_async(args: argparse.Namespace) -> None:
+    data_dir = args.data_dir.resolve()
+    output_dir = args.output_dir or data_dir / "output" / "openai" / f"workflow_{args.model}"
+    embedding_cache_dir = args.embedding_cache_dir or DEFAULT_MODEL_BASE_PATH / "embedding"
+
+    validate_inputs(data_dir)
+    if args.openai_api_key:
+        os.environ["OPENAI_API_KEY"] = args.openai_api_key
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise EnvironmentError("OPENAI_API_KEY is required. Set it in the environment or pass --openai-api-key.")
+
+    score_data = read_json(data_dir / "application_score_data.json")
+    test_case_config = read_json(data_dir / "test_case_config.json")
+    truthful_qa_questions = read_json(data_dir / "truthful_qa_questions.json")
+    datapool = read_json(data_dir / "evaluation_data_pool.json")
+
+    if not isinstance(score_data, dict) or not isinstance(test_case_config, dict) or not isinstance(datapool, dict):
+        raise ValueError("Simulation JSON files are not in the expected object format.")
+    if not isinstance(truthful_qa_questions, list):
+        raise ValueError("truthful_qa_questions.json must contain a list of questions.")
+
+    selected_cases = args.test_case or [tc["code"] for tc in get_test_cases(test_case_config)]
+    unknown_cases = [tc for tc in selected_cases if tc not in test_case_config]
+    if unknown_cases:
+        raise ValueError(f"Unknown test case(s): {', '.join(unknown_cases)}")
+    questions = truthful_qa_questions[: args.question_limit] if args.question_limit else truthful_qa_questions
+
+    print(f"Loading embedding model: {args.embedding_model_name}")
+    embedding_model = HuggingFaceEmbedding(
+        model_name=args.embedding_model_name,
+        cache_folder=str(embedding_cache_dir),
+    )
+
+    print(f"Using OpenAI model: {args.model}")
+    token_counter = TokenCountingHandler(tokenizer=build_tokenizer(args.model))
+    Settings.callback_manager = CallbackManager([token_counter])
+
+    temperature = None if args.disable_temperature else args.temperature
+    retrieval_temperature = None if args.disable_temperature else args.retrieval_temperature
+    base_llm = build_openai_llm(
+        model=args.model,
+        system_prompt=None,
+        temperature=temperature,
+        max_output_tokens=args.max_output_tokens,
+        reasoning_effort=args.reasoning_effort,
+        verbose=args.verbose_openai,
+    )
+    running_llm = build_openai_llm(
+        model=args.model,
+        system_prompt=RESPONSE_SYNTHESIS_SYSTEM_PROMPT,
+        temperature=temperature,
+        max_output_tokens=args.max_output_tokens,
+        reasoning_effort=args.reasoning_effort,
+        verbose=args.verbose_openai,
+    )
+    ja_ret_llm = build_openai_llm(
+        model=args.model,
+        system_prompt=JOB_APPLICATION_TOOL_SYSTEM_PROMPT,
+        temperature=retrieval_temperature,
+        max_output_tokens=args.max_output_tokens,
+        reasoning_effort=args.reasoning_effort,
+        verbose=args.verbose_openai,
+    )
+    jd_ret_llm = build_openai_llm(
+        model=args.model,
+        system_prompt=JOB_DESCRIPTION_TOOL_SYSTEM_PROMPT,
+        temperature=retrieval_temperature,
+        max_output_tokens=args.max_output_tokens,
+        reasoning_effort=args.reasoning_effort,
+        verbose=args.verbose_openai,
+    )
+    jp_ret_llm = build_openai_llm(
+        model=args.model,
+        system_prompt=JOB_POST_TOOL_SYSTEM_PROMPT,
+        temperature=retrieval_temperature,
+        max_output_tokens=args.max_output_tokens,
+        reasoning_effort=args.reasoning_effort,
+        verbose=args.verbose_openai,
+    )
+    c_ret_llm = build_openai_llm(
+        model=args.model,
+        system_prompt=COMPANY_INFORMATION_TOOL_SYSTEM_PROMPT,
+        temperature=retrieval_temperature,
+        max_output_tokens=args.max_output_tokens,
+        reasoning_effort=args.reasoning_effort,
+        verbose=args.verbose_openai,
+    )
+
+    for test_case in selected_cases:
+        print(f"Preparing vector stores for {test_case}")
+        data_ingestion_service = DataIngestionService(
+            base_dataset_folder=data_dir,
+            embedding_model=embedding_model,
+            score_data=score_data,
+        )
+        data_pool = get_simulation_data(test_case, datapool, test_case_config)
+        data_ingestion_service.write_data_to_stores(datapool=data_pool)
+
+        context_retrieval_agent = ContextBuilderAgentWorkflow(
+            llm=base_llm,
+            job_post_query_engine=data_ingestion_service.get_store_index("job_posts").as_query_engine(
+                llm=jp_ret_llm,
+                similarity_top_k=args.similarity_top_k,
+            ),
+            job_application_query_engine=data_ingestion_service.get_store_index("job_applications").as_query_engine(
+                llm=ja_ret_llm,
+                similarity_top_k=args.similarity_top_k,
+            ),
+            job_description_query_engine=data_ingestion_service.get_store_index("job_descriptions").as_query_engine(
+                llm=jd_ret_llm,
+                similarity_top_k=args.similarity_top_k,
+            ),
+            company_info_query_engine=data_ingestion_service.get_store_index("company_info").as_query_engine(
+                llm=c_ret_llm,
+                similarity_top_k=args.similarity_top_k,
+            ),
+            max_tool_use=args.max_tool_use,
+        )
+        dss_agent = HiringDSSAgentWorkflow(context_agent=context_retrieval_agent, response_synthesis_llm=running_llm, max_iterations=1)
+        await run_simulation(test_case, questions, dss_agent.run, output_dir.resolve(), token_counter)
+
+    print(f"Simulation complete. Results written to: {output_dir.resolve()}")
+
+
+JOB_APPLICATION_TOOL_SYSTEM_PROMPT = """\
+You are a helpful, respectful and honest assistant with access to information about candidates and their job applications.
+Use this tool to retrieve details about specific applicants, their application status, and associated candidate-specific data.
+Do not speculate or make up information. Do not reference any given instructions or context.
+"""
+
+RESPONSE_SYNTHESIS_SYSTEM_PROMPT = """\
+You are a world class state of the art agent.
+
+You have access to a user question and context with information relevant to that question.
+Generate a coherent, useful response with as much detail as the context supports.
+
+Guidelines:
+* Be as specific as possible.
+* Only use information from the provided context.
+* Candidate information in this environment is anonymised and safe to use.
+"""
+
+JOB_POST_TOOL_SYSTEM_PROMPT = """\
+You are a helpful, respectful and honest assistant with access to information regarding job postings,
+including job advertisement details and associated salary information. Use this tool to retrieve details
+about job posts and compensation. Do not speculate or make up information.
+"""
+
+JOB_DESCRIPTION_TOOL_SYSTEM_PROMPT = """\
+You are a helpful, respectful and honest assistant with access to detailed job description content.
+Use this tool to retrieve responsibilities, qualifications, and other descriptive elements of job roles.
+Do not speculate or make up information.
+"""
+
+COMPANY_INFORMATION_TOOL_SYSTEM_PROMPT = """\
+You are a helpful, respectful and honest assistant with access to general information about a company
+the candidate is applying to. Use this tool to retrieve company details and relevant organizational data.
+Do not speculate or make up information.
+"""
+
+
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    asyncio.run(main_async(args))
+
+
+if __name__ == "__main__":
+    main()
