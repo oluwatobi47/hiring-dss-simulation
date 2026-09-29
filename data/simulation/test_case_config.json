@@ -1,0 +1,37 @@
+{
+  "TC1": {
+    "code": "TC1",
+    "summary": "Test case contains information on 3 Job descriptions, 3 Job posts and 3 job applications",
+    "job_descriptions": 3,
+    "job_posts": 3,
+    "job_applications": 3
+  },
+  "TC2": {
+    "code": "TC2",
+    "summary": "Test case contains information on 5 Job descriptions, 5 Job posts and 10 job applications",
+    "job_descriptions": 8,
+    "job_posts": 8,
+    "job_applications": 10
+  },
+  "TC3": {
+    "code": "TC3",
+    "summary": "Test case contains information on 10 Job descriptions, 10 Job posts and 20 job applications",
+    "job_descriptions": 12,
+    "job_posts": 11,
+    "job_applications": 20
+  },
+  "TC4": {
+    "code": "TC4",
+    "summary": "Test case contains information on 20 Job descriptions, 10 Job posts and 50 job applications",
+    "job_descriptions": 19,
+    "job_posts": 17,
+    "job_applications": 50
+  },
+    "TC5": {
+    "code": "TC5",
+    "summary": "Test case contains information on 20 Job descriptions, 20 Job posts and 100 job applications",
+    "job_descriptions": 20,
+    "job_posts": 17,
+    "job_applications": 100
+  }
+}
