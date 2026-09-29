@@ -596,7 +596,16 @@ async def run_simulation(
     run_function: Callable[..., Awaitable[Any]],
     output_path: Path,
     token_counter: TokenCountingHandler,
+    progress_state: dict[str, Any],
 ) -> None:
+    def render_progress(done: int, total: int, width: int = 30) -> str:
+        if total <= 0:
+            return "[" + ("-" * width) + "]   0.0%"
+        ratio = done / total
+        filled = min(width, max(0, int(ratio * width)))
+        bar = "#" * filled + "-" * (width - filled)
+        return f"[{bar}] {ratio * 100:5.1f}%"
+
     for index, question in enumerate(questions):
         error = None
         response = None
@@ -630,6 +639,15 @@ async def run_simulation(
         }
         add_to_json_file(output_path / f"TC_OUTPUT_{test_case}.json", metric_data)
 
+        progress_state["completed"] += 1
+        completed = progress_state["completed"]
+        total = progress_state["total"]
+        elapsed = time.perf_counter() - progress_state["started_at"]
+        eta_seconds = (elapsed / completed) * (total - completed) if completed > 0 else 0.0
+        print(
+            f"Progress {render_progress(completed, total)} "
+            f"({completed}/{total}) | elapsed {elapsed:.1f}s | ETA {eta_seconds:.1f}s"
+        )
 
 def build_openai_llm(
     *,
@@ -796,6 +814,10 @@ async def main_async(args: argparse.Namespace) -> None:
         verbose=args.verbose_openai,
     )
 
+    total_questions = len(selected_cases) * len(questions)
+    progress_state = {"completed": 0, "total": total_questions, "started_at": time.perf_counter()}
+    print(f"Starting simulation: {len(selected_cases)} test case(s), {len(questions)} question(s) each ({total_questions} total).")
+
     for test_case in selected_cases:
         print(f"Preparing vector stores for {test_case}")
         data_ingestion_service = DataIngestionService(
@@ -827,7 +849,7 @@ async def main_async(args: argparse.Namespace) -> None:
             max_tool_use=args.max_tool_use,
         )
         dss_agent = HiringDSSAgentWorkflow(context_agent=context_retrieval_agent, response_synthesis_llm=running_llm, max_iterations=1)
-        await run_simulation(test_case, questions, dss_agent.run, output_dir.resolve(), token_counter)
+        await run_simulation(test_case, questions, dss_agent.run, output_dir.resolve(), token_counter, progress_state)
 
     print(f"Simulation complete. Results written to: {output_dir.resolve()}")
 

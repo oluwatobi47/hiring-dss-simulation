@@ -730,7 +730,16 @@ async def run_simulation(
     run_function: Callable[..., Awaitable[Any]],
     output_path: Path,
     token_counter: TokenCountingHandler,
+    progress_state: dict[str, Any],
 ) -> None:
+    def render_progress(done: int, total: int, width: int = 30) -> str:
+        if total <= 0:
+            return "[" + ("-" * width) + "]   0.0%"
+        ratio = done / total
+        filled = min(width, max(0, int(ratio * width)))
+        bar = "#" * filled + "-" * (width - filled)
+        return f"[{bar}] {ratio * 100:5.1f}%"
+
     for index, question in enumerate(questions):
         error = None
         response = None
@@ -764,6 +773,16 @@ async def run_simulation(
         }
         add_to_json_file(output_path / f"TC_OUTPUT_{test_case}.json", metric_data)
 
+        progress_state["completed"] += 1
+        completed = progress_state["completed"]
+        total = progress_state["total"]
+        elapsed = time.perf_counter() - progress_state["started_at"]
+        eta_seconds = (elapsed / completed) * (total - completed) if completed > 0 else 0.0
+        print(
+            f"Progress {render_progress(completed, total)} "
+            f"({completed}/{total}) | elapsed {elapsed:.1f}s | ETA {eta_seconds:.1f}s"
+        )
+
 
 def get_model_args(prompt: str, temperature: float = 0.6) -> RuntimeLLMArgs:
     return RuntimeLLMArgs(system_prompt=prompt, verbose=False, temperature=temperature)
@@ -786,7 +805,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--retrieval-temperature", type=float, default=0.3)
-    parser.add_argument("--n-gpu-layers", type=int, default=20, help="llama.cpp GPU layers. Use 0 for CPU-only.")
+    parser.add_argument("--n-gpu-layers", type=int, default=-1, help="llama.cpp GPU layers. Defaults to -1 (all layers). Use 0 for CPU-only.")
     parser.add_argument("--verbose-llama", action="store_true", help="Enable llama.cpp verbose logging.")
     parser.add_argument("--skip-cuda-cleanup", action="store_true", help="Skip torch CUDA cache cleanup at exit.")
     return parser
@@ -865,6 +884,10 @@ async def main_async(args: argparse.Namespace) -> None:
     jp_ret_llm = RuntimeLlamaLLM(llm=base_llm, model_config=get_model_args(JOB_POST_TOOL_SYSTEM_PROMPT, args.retrieval_temperature))
     c_ret_llm = RuntimeLlamaLLM(llm=base_llm, model_config=get_model_args(COMPANY_INFORMATION_TOOL_SYSTEM_PROMPT, args.retrieval_temperature))
 
+    total_questions = len(selected_cases) * len(questions)
+    progress_state = {"completed": 0, "total": total_questions, "started_at": time.perf_counter()}
+    print(f"Starting simulation: {len(selected_cases)} test case(s), {len(questions)} question(s) each ({total_questions} total).")
+
     for test_case in selected_cases:
         print(f"Preparing vector stores for {test_case}")
         data_ingestion_service = DataIngestionService(
@@ -896,7 +919,7 @@ async def main_async(args: argparse.Namespace) -> None:
             max_tool_use=args.max_tool_use,
         )
         dss_agent = HiringDSSAgentWorkflow(context_agent=context_retrieval_agent, llm=running_llm, max_iterations=1)
-        await run_simulation(test_case, questions, dss_agent.run, output_dir.resolve(), token_counter)
+        await run_simulation(test_case, questions, dss_agent.run, output_dir.resolve(), token_counter, progress_state)
 
     if not args.skip_cuda_cleanup and torch.cuda.is_available():
         gc.collect()

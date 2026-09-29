@@ -120,8 +120,10 @@ python run_llm_cpp_simulation.py \
 For CPU-only execution:
 
 ```bash
-python run_llm_cpp_simulation.py --simulation-model 8b_Q4 --n-gpu-layers 0
+python run_llm_cpp_simulation.py --simulation-model 8b_Q4 --n-gpu-layers -1
 ```
+
+By default, `run_llm_cpp_simulation.py` uses `--n-gpu-layers -1` (all layers).
 
 ### OpenAI
 
@@ -169,7 +171,7 @@ Llama.cpp-specific arguments:
 - `--simulation-model`: one of `8b`, `8b_Q4`, or `8b_Q8`.
 - `--model-path`: direct path to a `.gguf` file. Overrides `--simulation-model`.
 - `--model-base-path`: folder containing the default model filenames.
-- `--n-gpu-layers`: llama.cpp GPU layers. Use `0` for CPU-only.
+- `--n-gpu-layers`: llama.cpp GPU layers. Defaults to `-1` (all layers). Use `0` for CPU-only.
 
 OpenAI-specific arguments:
 
