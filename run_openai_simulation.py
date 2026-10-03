@@ -31,7 +31,7 @@ from pydantic import BaseModel
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "simulation"
 DEFAULT_MODEL_BASE_PATH = REPO_ROOT / "model"
-DEFAULT_OPENAI_MODEL = "gpt-6-luna"
+DEFAULT_OPENAI_MODEL = "gpt-5.6-terra"
 
 
 def add_to_json_file(json_file: Path, new_data: dict[str, Any]) -> None:
