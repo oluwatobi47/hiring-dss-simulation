@@ -476,14 +476,14 @@ class ContextBuilderAgentWorkflow(Workflow):
         self.llm = llm
 
     async def update_tool_use_context(self, ctx: Context, tool: str) -> None:
-        tool_use_data = await ctx.get("tool_use_tracker", {})
+        tool_use_data = await ctx.store.get("tool_use_tracker", {})
         tool_use_data[tool] = (tool_use_data[tool] if tool in tool_use_data and tool_use_data[tool] >= 0 else 0) + 1
-        await ctx.set("tool_use_tracker", tool_use_data)
+        await ctx.store.set("tool_use_tracker", tool_use_data)
 
     async def tool_use_limit_reached(self, ctx: Context, tool: str | None) -> bool:
         if not tool:
             return False
-        tool_use_data = await ctx.get("tool_use_tracker", {})
+        tool_use_data = await ctx.store.get("tool_use_tracker", {})
         return tool_use_data[tool] >= self.max_tool_use if tool in tool_use_data and tool_use_data[tool] else False
 
     def process_query_engine_context_retrieval(
@@ -563,12 +563,12 @@ class ContextBuilderAgentWorkflow(Workflow):
         ev: ContextOutputEvent,
     ) -> JobApplicationContextEvent | JobPostContextEvent | JobDescriptionContextEvent | CompanyInfoContextEvent | StopEvent:
         await self.update_tool_use_context(ctx, ev.tool)
-        tool_paths = await ctx.get("tool_path", [])
-        context = await ctx.get("generated_context", [])
+        tool_paths = await ctx.store.get("tool_path", [])
+        context = await ctx.store.get("generated_context", [])
         context.append(ev.output)
         tool_paths.append(ev.tool)
-        await ctx.set("tool_path", tool_paths)
-        await ctx.set("generated_context", context)
+        await ctx.store.set("tool_path", tool_paths)
+        await ctx.store.set("generated_context", context)
 
         context_string = "\n".join(context)
         context_tools = "\n".join([f"{index + 1}. {tool}" for index, tool in enumerate(tool_paths)])

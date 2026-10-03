@@ -150,10 +150,11 @@ python run_openai_simulation.py \
 Use a different OpenAI model:
 
 ```bash
-python run_openai_simulation.py --model gpt-6-sol
+python run_openai_simulation.py --model gpt-5.6-terra
 ```
 
-The OpenAI docs currently list `gpt-6-astra` for highest capability, `gpt-6-sol` for balancing intelligence and cost, and `gpt-6-luna` for high-volume workloads. This script defaults to `gpt-6-luna` because the simulation can make many calls. If you use reasoning effort above `none` and the API rejects `temperature`, rerun with `--disable-temperature`.
+The OpenAI docs currently list `gpt-6-astra` for highest capability, `gpt-6-sol` for balancing intelligence and cost, and `gpt-6-luna` for high-volume workloads. This script defaults to `gpt-5.6-terra` because the simulation can make many calls. If you use reasoning effort above `none` and the API rejects `temperature`, rerun with `--disable-temperature`.
+The for the current version of api packages used in this project, the gpt-5 series are currently the highest capable models supported.
 
 ## Main Arguments
 
@@ -176,7 +177,7 @@ Llama.cpp-specific arguments:
 OpenAI-specific arguments:
 
 - `--output-dir`: folder for result JSON files. Defaults to `data/simulation/output/openai/workflow_<model>`.
-- `--model`: OpenAI model ID. Defaults to `gpt-6-luna`.
+- `--model`: OpenAI model ID. Defaults to `gpt-5.6-terra`.
 - `--openai-api-key`: API key override. Defaults to `OPENAI_API_KEY`.
 - `--reasoning-effort`: one of `none`, `low`, `medium`, `high`, `xhigh`, or `max`.
 - `--disable-temperature`: omit temperature for models or reasoning modes that reject it.
