@@ -369,7 +369,7 @@ class ContextBuilderAgentWorkflow(Workflow):
         tool_use_data = await ctx.get("tool_use_tracker", {})
         return tool_use_data[tool] >= self.max_tool_use if tool in tool_use_data and tool_use_data[tool] else False
 
-    def process_query_engine_context_retrieval(
+    def _process_query_engine_context_retrieval(
         self,
         engine: BaseQueryEngine,
         event: ContextRetrievalEvent,
@@ -425,19 +425,19 @@ class ContextBuilderAgentWorkflow(Workflow):
 
     @step
     async def job_application_agent_node(self, event: JobApplicationContextEvent) -> ContextOutputEvent:
-        return self.process_query_engine_context_retrieval(self.job_application_query_engine, event)
+        return self._process_query_engine_context_retrieval(self.job_application_query_engine, event)
 
     @step
     async def job_post_agent_node(self, event: JobPostContextEvent) -> ContextOutputEvent:
-        return self.process_query_engine_context_retrieval(self.job_post_query_engine, event)
+        return self._process_query_engine_context_retrieval(self.job_post_query_engine, event)
 
     @step
     async def job_description_agent_node(self, event: JobDescriptionContextEvent) -> ContextOutputEvent:
-        return self.process_query_engine_context_retrieval(self.job_description_query_engine, event)
+        return self._process_query_engine_context_retrieval(self.job_description_query_engine, event)
 
     @step
     async def company_info_agent_node(self, event: CompanyInfoContextEvent) -> ContextOutputEvent:
-        return self.process_query_engine_context_retrieval(self.company_info_query_engine, event)
+        return self._process_query_engine_context_retrieval(self.company_info_query_engine, event)
 
     @step
     async def context_evaluator_agent_node(
