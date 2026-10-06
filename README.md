@@ -156,6 +156,29 @@ python run_openai_simulation.py --model gpt-5.6-terra
 The OpenAI docs currently list `gpt-6-astra` for highest capability, `gpt-6-sol` for balancing intelligence and cost, and `gpt-6-luna` for high-volume workloads. This script defaults to `gpt-5.6-terra` because the simulation can make many calls. If you use reasoning effort above `none` and the API rejects `temperature`, rerun with `--disable-temperature`.
 The for the current version of api packages used in this project, the gpt-5 series are currently the highest capable models supported.
 
+### Evaluate Simulation Results
+
+After generating `TC_OUTPUT_*.json` files, run the evaluator to score correctness and relevancy:
+
+```bash
+python evaluate_simulation_results.py
+```
+
+Evaluate a specific results folder:
+
+```bash
+python evaluate_simulation_results.py \
+  --results-dir data/simulation/output/openai/workflow_gpt-5.6-terra
+```
+
+Use a different judge model:
+
+```bash
+python evaluate_simulation_results.py --model gpt-5.6-terra
+```
+
+The evaluator writes `TC_EVAL_*.json` and `EVAL_SUMMARY.json` to `<results-dir>/evaluation` by default. The judge model default is `gpt-5.6-terra`.
+
 ## Main Arguments
 
 Shared arguments:
