@@ -16,5 +16,6 @@ env/
 model/*
 data/simulation/dataset/*
 data/simulation/output/
+data/simulation/evaluation/
 data/simulation/vector_db/
 /notebooks/lib

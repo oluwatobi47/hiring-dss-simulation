@@ -10,3 +10,7 @@ sentence-transformers>=3.0.0
 transformers>=4.40.0
 pypdf>=4.0.0
 docx2txt>=0.8
+
+matplotlib
+seaborn
+pandas
