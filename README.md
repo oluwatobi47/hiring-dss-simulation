@@ -1,5 +1,8 @@
 # Local Simulation Runners
 
+For Qwen3.5-9B, Gemma 4 12B, Qwen3.8-27B and gpt-oss-20b runners, see
+[Open-weight simulation setup and usage](OPEN_WEIGHT_SIMULATIONS.md).
+
 This folder contains standalone runners for the local hiring DSS simulation.
 
 It includes both Llama.cpp-backed and OpenAI-backed execution paths.

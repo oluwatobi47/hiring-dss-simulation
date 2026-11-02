@@ -28,7 +28,7 @@ from llama_index.readers.file import DocxReader, PDFReader
 from pydantic import BaseModel
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "simulation"
 DEFAULT_MODEL_BASE_PATH = REPO_ROOT / "model"
 DEFAULT_OPENAI_MODEL = "gpt-5.6-terra"
@@ -726,15 +726,22 @@ def validate_inputs(data_dir: Path) -> None:
         raise FileNotFoundError("Missing required input files:\n" + "\n".join(f"- {path}" for path in missing))
 
 
-async def main_async(args: argparse.Namespace) -> None:
+async def main_async(
+    args: argparse.Namespace,
+    *,
+    llm_factory: Callable[..., LLM] = build_openai_llm,
+    tokenizer: Callable | None = None,
+    provider: str = "openai",
+    require_openai_key: bool = True,
+) -> None:
     data_dir = args.data_dir.resolve()
     output_dir = args.output_dir or data_dir / "output" / "openai" / f"workflow_{args.model}"
     embedding_cache_dir = args.embedding_cache_dir or DEFAULT_MODEL_BASE_PATH / "embedding"
 
     validate_inputs(data_dir)
-    if args.openai_api_key:
+    if require_openai_key and args.openai_api_key:
         os.environ["OPENAI_API_KEY"] = args.openai_api_key
-    if not os.environ.get("OPENAI_API_KEY"):
+    if require_openai_key and not os.environ.get("OPENAI_API_KEY"):
         raise EnvironmentError("OPENAI_API_KEY is required. Set it in the environment or pass --openai-api-key.")
 
     score_data = read_json(data_dir / "application_score_data.json")
@@ -759,13 +766,13 @@ async def main_async(args: argparse.Namespace) -> None:
         cache_folder=str(embedding_cache_dir),
     )
 
-    print(f"Using OpenAI model: {args.model}")
-    token_counter = TokenCountingHandler(tokenizer=build_tokenizer(args.model))
+    print(f"Using {provider} model: {args.model}")
+    token_counter = TokenCountingHandler(tokenizer=tokenizer or build_tokenizer(args.model))
     Settings.callback_manager = CallbackManager([token_counter])
 
     temperature = None if args.disable_temperature else args.temperature
     retrieval_temperature = None if args.disable_temperature else args.retrieval_temperature
-    base_llm = build_openai_llm(
+    base_llm = llm_factory(
         model=args.model,
         system_prompt=None,
         temperature=temperature,
@@ -773,7 +780,7 @@ async def main_async(args: argparse.Namespace) -> None:
         reasoning_effort=args.reasoning_effort,
         verbose=args.verbose_openai,
     )
-    running_llm = build_openai_llm(
+    running_llm = llm_factory(
         model=args.model,
         system_prompt=RESPONSE_SYNTHESIS_SYSTEM_PROMPT,
         temperature=temperature,
@@ -781,7 +788,7 @@ async def main_async(args: argparse.Namespace) -> None:
         reasoning_effort=args.reasoning_effort,
         verbose=args.verbose_openai,
     )
-    ja_ret_llm = build_openai_llm(
+    ja_ret_llm = llm_factory(
         model=args.model,
         system_prompt=JOB_APPLICATION_TOOL_SYSTEM_PROMPT,
         temperature=retrieval_temperature,
@@ -789,7 +796,7 @@ async def main_async(args: argparse.Namespace) -> None:
         reasoning_effort=args.reasoning_effort,
         verbose=args.verbose_openai,
     )
-    jd_ret_llm = build_openai_llm(
+    jd_ret_llm = llm_factory(
         model=args.model,
         system_prompt=JOB_DESCRIPTION_TOOL_SYSTEM_PROMPT,
         temperature=retrieval_temperature,
@@ -797,7 +804,7 @@ async def main_async(args: argparse.Namespace) -> None:
         reasoning_effort=args.reasoning_effort,
         verbose=args.verbose_openai,
     )
-    jp_ret_llm = build_openai_llm(
+    jp_ret_llm = llm_factory(
         model=args.model,
         system_prompt=JOB_POST_TOOL_SYSTEM_PROMPT,
         temperature=retrieval_temperature,
@@ -805,7 +812,7 @@ async def main_async(args: argparse.Namespace) -> None:
         reasoning_effort=args.reasoning_effort,
         verbose=args.verbose_openai,
     )
-    c_ret_llm = build_openai_llm(
+    c_ret_llm = llm_factory(
         model=args.model,
         system_prompt=COMPANY_INFORMATION_TOOL_SYSTEM_PROMPT,
         temperature=retrieval_temperature,

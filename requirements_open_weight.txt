@@ -1,0 +1,2 @@
+-r requirements_openai.txt
+llama-index-llms-openai-like>=0.5.0
