@@ -49,7 +49,7 @@ from llama_index.readers.file import DocxReader, PDFReader
 from pydantic import BaseModel, PrivateAttr
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "simulation"
 DEFAULT_MODEL_BASE_PATH = REPO_ROOT / "model"
 

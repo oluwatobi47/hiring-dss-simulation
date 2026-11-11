@@ -5,6 +5,7 @@ These runners share the prompts, retrieval, agent workflow and result schema in
 
 | Entry point | Default model |
 |---|---|
+| `run_open_weight_simulation.py --profile llama31_8b` | `meta-llama/Llama-3.1-8B-Instruct` |
 | `run_qwen35_9b_simulation.py` | `Qwen/Qwen3.5-9B` |
 | `run_gemma4_12b_simulation.py` | `google/gemma-4-12B-it` |
 | `run_qwen38_27b_simulation.py` | `Qwen/Qwen3.8-27B` |
@@ -104,8 +105,8 @@ python evaluate_simulation_results.py --results-dir /absolute/path/to/run
 ```
 
 Evaluation uses the existing OpenAI judge and requires its API credentials.
-The analysis notebook's hardcoded model/path map must be updated separately
-before plotting these new runs.
+For the ten-configuration GGUF/Terra study and its new analysis notebook, follow
+[the comparison README](README.md). It uses an explicit run manifest.
 
 ## Offline validation
 

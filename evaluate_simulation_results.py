@@ -15,7 +15,7 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.llms.openai import OpenAI
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "simulation"
 DEFAULT_JUDGE_MODEL = "gpt-5.6-terra"
 
@@ -202,6 +202,12 @@ def judge_answer(llm: OpenAI, prompt: str, expected_answer: str, model_answer: s
             "context_relevancy_reason": "Judge JSON could not be parsed.",
         }
 
+    if not isinstance(data, dict) or any(not isinstance(data.get(key), bool) for key in
+                                          ("correct", "answer_relevant", "context_relevant")):
+        return {"correct": False, "answer_relevant": False, "context_relevant": False,
+                "correctness_reason": "Judge JSON has missing or invalid boolean fields.",
+                "relevancy_reason": "Invalid judge schema.",
+                "context_relevancy_reason": "Invalid judge schema."}
     return {
         "correct": safe_bool(data.get("correct"), default=False),
         "answer_relevant": safe_bool(data.get("answer_relevant"), default=False),

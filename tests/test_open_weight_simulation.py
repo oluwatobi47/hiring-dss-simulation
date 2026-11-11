@@ -28,7 +28,8 @@ class OpenWeightTests(unittest.TestCase):
             self.assertIn("open_weight", args.output_dir.parts)
             paths.add(args.output_dir)
             self.assertEqual(args.reasoning_effort, "medium" if profile == "gpt_oss_20b" else None)
-        self.assertEqual(len(paths), 4)
+        self.assertEqual(len(paths), len(MODELS))
+        self.assertEqual(MODELS["llama31_8b"], "meta-llama/Llama-3.1-8B-Instruct")
 
     def test_invalid_configuration(self):
         for flags in [

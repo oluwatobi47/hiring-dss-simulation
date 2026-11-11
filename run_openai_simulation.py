@@ -688,7 +688,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the OpenAI hiring DSS simulation.")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="Folder containing simulation JSON files and dataset files.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Folder for output JSON files. Defaults to <data-dir>/output/openai/workflow_<model>.")
-    parser.add_argument("--model", default=DEFAULT_OPENAI_MODEL, help="OpenAI model ID. Defaults to gpt-6-luna for high-volume simulation runs.")
+    parser.add_argument("--model", default=DEFAULT_OPENAI_MODEL, help="OpenAI model ID. Defaults to gpt-5.6-terra.")
+    parser.add_argument("--checkpoint-label", default="gpt-5.6-terra API; provider-managed hardware",
+                        help="Record the requested API checkpoint and deployment details.")
     parser.add_argument("--embedding-model-name", default="BAAI/bge-m3", help="Hugging Face embedding model name or local path.")
     parser.add_argument("--embedding-cache-dir", type=Path, default=None, help="Embedding cache folder. Defaults to <repo>/model/embedding.")
     parser.add_argument("--test-case", action="append", help="Run one test case code, e.g. TC1. Repeat to run multiple. Defaults to all.")
@@ -743,6 +745,17 @@ async def main_async(
         os.environ["OPENAI_API_KEY"] = args.openai_api_key
     if require_openai_key and not os.environ.get("OPENAI_API_KEY"):
         raise EnvironmentError("OPENAI_API_KEY is required. Set it in the environment or pass --openai-api-key.")
+
+    if provider == "openai":
+        from datetime import datetime, timezone
+        if output_dir.exists() and any(output_dir.iterdir()):
+            raise FileExistsError(f"Choose an empty --output-dir: {output_dir}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config = {key: str(value) if isinstance(value, Path) else value
+                  for key, value in vars(args).items() if "key" not in key}
+        config.update(provider=provider, started_at_utc=datetime.now(timezone.utc).isoformat(),
+                      token_count_note="Client tokenizer estimates; hidden reasoning may differ.")
+        (output_dir / "RUN_CONFIG.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     score_data = read_json(data_dir / "application_score_data.json")
     test_case_config = read_json(data_dir / "test_case_config.json")

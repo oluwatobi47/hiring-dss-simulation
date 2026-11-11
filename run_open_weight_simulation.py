@@ -16,12 +16,12 @@ from pathlib import Path
 import re
 from typing import Any
 from urllib.parse import urlsplit
+from model_comparison_registry import TOKENIZERS
 
 
 ROOT = Path(__file__).resolve().parent
 MODELS = {
-    "qwen35_9b": "Qwen/Qwen3.5-9B",
-    "gemma4_12b": "google/gemma-4-12B-it",
+    **TOKENIZERS,
     "qwen38_27b": "Qwen/Qwen3.8-27B",
     "gpt_oss_20b": "openai/gpt-oss-20b",
 }
